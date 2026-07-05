@@ -58,36 +58,38 @@ def load_markdown_notes(notes_dir: Path) -> list[Document]:
 def load_bookmarks(bookmarks_dir: Path) -> list[Document]:
     """Parse Netscape-format bookmark exports (.html) from Chrome/Firefox/Edge.
 
-    Each bookmark becomes one small Document: title + URL + folder path.
+    Strict extraction: only the <A> tag's inner text (title) and HREF (URL).
+    Attribute noise (ADD_DATE, LAST_MODIFIED, ICON, TAGS) and raw HTML never
+    reach page_content; folder goes to metadata only.
     """
     docs: list[Document] = []
     if not bookmarks_dir.is_dir():
         logger.warning("Bookmarks directory missing: %s", bookmarks_dir)
         return docs
 
+    seen_urls: set[str] = set()
     for path in sorted(bookmarks_dir.glob("*.html")):
         text = _read_text(path)
         if not text:
             continue
         soup = BeautifulSoup(text, "lxml")
         for anchor in soup.find_all("a"):
-            url = anchor.get("href", "").strip()
-            title = anchor.get_text(strip=True)
-            if not url or not url.startswith(("http://", "https://")):
+            url = (anchor.get("href") or "").strip()
+            if not url.startswith(("http://", "https://")) or url in seen_urls:
                 continue
+            seen_urls.add(url)
+            title = " ".join(anchor.get_text(" ", strip=True).split()) or url
             # folder = nearest preceding H3 (Netscape format nests folders as H3)
             folder_tag = anchor.find_previous("h3")
             folder = folder_tag.get_text(strip=True) if folder_tag else ""
-            content = f"Bookmark: {title}\nURL: {url}"
-            if folder:
-                content += f"\nFolder: {folder}"
             docs.append(
                 Document(
-                    page_content=content,
+                    page_content=f"{title}\n{url}",
                     metadata={
                         "source": url,
                         "source_type": "bookmark",
-                        "title": title or url,
+                        "title": title,
+                        "folder": folder,
                     },
                 )
             )

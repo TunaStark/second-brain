@@ -28,7 +28,10 @@ MD_HEADERS_TO_SPLIT_ON = [
     ("###", "h3"),
 ]
 
-# --- Retrieval ---
-RETRIEVAL_K = 5                 # final chunks fed to LLM
-RETRIEVAL_FETCH_K = 20          # MMR candidate pool
-RETRIEVAL_LAMBDA = 0.5          # MMR relevance/diversity balance
+# --- Retrieval (hybrid + rerank) ---
+DOCSTORE_PATH = PROJECT_ROOT / "storage" / "docstore.jsonl"  # BM25 corpus, written by ingest
+HYBRID_DENSE_K = 10             # candidates from Chroma (semantic)
+HYBRID_SPARSE_K = 10            # candidates from BM25 (keyword)
+ENSEMBLE_WEIGHTS = [0.5, 0.5]   # [dense, sparse] RRF weights
+RERANK_MODEL = "ms-marco-MultiBERT-L-12"  # FlashRank, multilingual; auto-downloads once
+RERANK_TOP_N = 5                # final chunks fed to LLM

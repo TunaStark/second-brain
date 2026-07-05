@@ -4,6 +4,7 @@ Run:  python -m src.ingest [--reset]
 """
 
 import argparse
+import json
 import logging
 import shutil
 import sys
@@ -61,6 +62,8 @@ def ingest(reset: bool = False) -> None:
     if reset and config.STORAGE_DIR.exists():
         logger.info("Resetting vector store at %s", config.STORAGE_DIR)
         shutil.rmtree(config.STORAGE_DIR)
+    if reset:
+        config.DOCSTORE_PATH.unlink(missing_ok=True)
 
     # Ensure data dirs exist so first run tells the user where to put files.
     config.NOTES_DIR.mkdir(parents=True, exist_ok=True)
@@ -77,6 +80,19 @@ def ingest(reset: bool = False) -> None:
 
     chunks = chunk_documents(docs)
     logger.info("Chunked %d documents into %d chunks", len(docs), len(chunks))
+
+    # Persist raw chunks as JSONL: BM25 rebuilds its sparse index from this at query time.
+    config.DOCSTORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(config.DOCSTORE_PATH, "w", encoding="utf-8") as fh:
+        for chunk in chunks:
+            fh.write(
+                json.dumps(
+                    {"page_content": chunk.page_content, "metadata": chunk.metadata},
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    logger.info("Docstore for BM25 written to %s", config.DOCSTORE_PATH)
 
     embeddings = OllamaEmbeddings(
         model=config.EMBEDDING_MODEL,
