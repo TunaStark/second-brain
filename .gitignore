@@ -13,3 +13,11 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# IDE, Araç ve Asistan Önbellekleri
+.claude/
+.files/
+
+# Chainlit'in kendi ürettiği yerel log/veri klasörü (varsa)
+.chainlit/translations/
+.chainlit/data/

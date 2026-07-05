@@ -1,25 +1,24 @@
-"""Query pipeline: interactive RAG chat over your second brain.
+"""Chainlit web chat: RAG over your second brain.
 
-Run:  python -m src.query               (interactive)
-      python -m src.query "question"    (one-shot)
+Run:  chainlit run src/query.py -w
 """
 
-import logging
 import sys
+from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import chainlit as cl
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_ollama import ChatOllama, OllamaEmbeddings
-from rich.console import Console
-from rich.panel import Panel
 
 from src import config
 
-logging.basicConfig(level=logging.WARNING, format="%(levelname)s | %(message)s")
-console = Console()
+MAX_HISTORY_MESSAGES = 8  # keep prompt inside LLM_NUM_CTX
 
 SYSTEM_PROMPT = """\
 You are "Second Brain", the user's personal knowledge assistant.
@@ -42,7 +41,7 @@ def format_docs(docs: list[Document]) -> str:
     return "\n\n---\n\n".join(parts)
 
 
-def build_chain():
+def build_retriever():
     embeddings = OllamaEmbeddings(
         model=config.EMBEDDING_MODEL,
         base_url=config.OLLAMA_BASE_URL,
@@ -53,10 +52,9 @@ def build_chain():
         persist_directory=str(config.STORAGE_DIR),
     )
     if not vectorstore._collection.count():
-        console.print("[red]Vector store is empty. Run `python -m src.ingest` first.[/red]")
-        sys.exit(1)
+        raise RuntimeError("Vector store is empty. Run `python -m src.ingest` first.")
 
-    retriever = vectorstore.as_retriever(
+    return vectorstore.as_retriever(
         search_type="mmr",
         search_kwargs={
             "k": config.RETRIEVAL_K,
@@ -64,6 +62,9 @@ def build_chain():
             "lambda_mult": config.RETRIEVAL_LAMBDA,
         },
     )
+
+
+def build_chain():
     llm = ChatOllama(
         model=config.LLM_MODEL,
         base_url=config.OLLAMA_BASE_URL,
@@ -71,72 +72,85 @@ def build_chain():
         num_ctx=config.LLM_NUM_CTX,
     )
     prompt = ChatPromptTemplate.from_messages(
-        [("system", SYSTEM_PROMPT), ("human", "{question}")]
+        [
+            ("system", SYSTEM_PROMPT),
+            MessagesPlaceholder("history"),
+            ("human", "{question}"),
+        ]
     )
-    chain = (
-        {"context": retriever | format_docs, "question": RunnablePassthrough()}
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
-    return chain, retriever
+    return prompt | llm | StrOutputParser()
 
 
-def answer(chain, retriever, question: str) -> None:
-    sources = retriever.invoke(question)
-
-    console.print()
+@cl.on_chat_start
+async def on_chat_start():
     try:
-        for token in chain.stream(question):
-            console.print(token, end="")
-    except Exception as exc:
-        console.print(f"\n[red]LLM call failed: {exc}[/red]")
-        console.print(
-            f"[yellow]Check Ollama is running and `ollama pull {config.LLM_MODEL}` was done.[/yellow]"
-        )
+        retriever = build_retriever()
+    except RuntimeError as exc:
+        await cl.Message(content=f"⚠️ {exc}").send()
         return
-    console.print("\n")
 
-    seen, lines = set(), []
-    for doc in sources:
+    cl.user_session.set("retriever", retriever)
+    cl.user_session.set("chain", build_chain())
+    cl.user_session.set("history", [])
+
+    await cl.Message(
+        content=(
+            f"**Second Brain** — local RAG over your notes & bookmarks\n\n"
+            f"LLM: `{config.LLM_MODEL}` | Embeddings: `{config.EMBEDDING_MODEL}`"
+        )
+    ).send()
+
+
+@cl.on_message
+async def on_message(message: cl.Message):
+    retriever = cl.user_session.get("retriever")
+    chain = cl.user_session.get("chain")
+    history = cl.user_session.get("history")
+
+    if retriever is None or chain is None:
+        await cl.Message(content="Not ready — vector store missing. Ingest, then start a new chat.").send()
+        return
+
+    async with cl.Step(name="retrieval", type="retrieval") as step:
+        docs = await retriever.ainvoke(message.content)
+        step.output = "\n".join(
+            f"[{i}] {d.metadata.get('source', 'unknown')}" for i, d in enumerate(docs, 1)
+        )
+
+    msg = cl.Message(content="")
+    try:
+        async for token in chain.astream(
+            {
+                "context": format_docs(docs),
+                "question": message.content,
+                "history": history,
+            }
+        ):
+            await msg.stream_token(token)
+    except Exception as exc:
+        await cl.Message(
+            content=(
+                f"LLM call failed: `{exc}`\n\n"
+                f"Check Ollama is running and `ollama pull {config.LLM_MODEL}` was done."
+            )
+        ).send()
+        return
+
+    elements, names, seen = [], [], set()
+    for doc in docs:
         src = doc.metadata.get("source", "unknown")
         kind = doc.metadata.get("source_type", "note")
-        if src not in seen:
-            seen.add(src)
-            lines.append(f"• [{kind}] {src}")
-    if lines:
-        console.print(Panel("\n".join(lines), title="Sources", border_style="dim"))
-
-
-def main() -> None:
-    chain, retriever = build_chain()
-
-    # One-shot mode
-    if len(sys.argv) > 1:
-        answer(chain, retriever, " ".join(sys.argv[1:]))
-        return
-
-    # Interactive mode
-    console.print(
-        Panel(
-            f"[bold]Second Brain[/bold] — local RAG over your notes & bookmarks\n"
-            f"LLM: {config.LLM_MODEL} | Embeddings: {config.EMBEDDING_MODEL}\n"
-            f"Type your question. 'exit' to quit.",
-            border_style="cyan",
-        )
-    )
-    while True:
-        try:
-            question = console.input("[bold cyan]you>[/bold cyan] ").strip()
-        except (KeyboardInterrupt, EOFError):
-            break
-        if not question:
+        if src in seen:
             continue
-        if question.lower() in {"exit", "quit", "q"}:
-            break
-        answer(chain, retriever, question)
-    console.print("[dim]bye.[/dim]")
+        seen.add(src)
+        name = f"[{kind}] {src}"
+        names.append(name)
+        elements.append(cl.Text(name=name, content=doc.page_content, display="inline"))
+    if elements:
+        await msg.stream_token("\n\n**Sources:** " + " · ".join(f"`{n}`" for n in names))
+        msg.elements = elements
+    await msg.update()
 
-
-if __name__ == "__main__":
-    main()
+    history.append(HumanMessage(content=message.content))
+    history.append(AIMessage(content=msg.content))
+    cl.user_session.set("history", history[-MAX_HISTORY_MESSAGES:])
