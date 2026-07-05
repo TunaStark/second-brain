@@ -1,0 +1,15 @@
+# vector store — regenerable, never commit
+storage/
+
+# personal data — privacy first
+data/notes/*
+data/bookmarks/*
+!data/notes/.gitkeep
+!data/bookmarks/.gitkeep
+!data/notes/welcome.md
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
